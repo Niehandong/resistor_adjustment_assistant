@@ -116,6 +116,8 @@ location /api/ {
 | `MILVUS_DATABASE` / `MILVUS_COLLECTION` | 向量库名与集合名，默认都是 `resistor_adjustment…` |
 | `EMBEDDING_URL` / `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` | 嵌入模型（OpenAI 兼容 `/v1/embeddings`） |
 | `EMBEDDING_LIMIT` | 每次问答检索的切片数 |
+| `REWRITE_HISTORY_ROUNDS` | 多轮追问时，结合最近几轮对话把追问改写成完整问题再检索（默认 3，首轮不改写） |
+| `EMBEDDING_SCORE_THRESHOLD` | 检索相似度阈值（默认 0.60），低于该值的切片不作为参考资料；可结合「会话记录」中的检索得分调整 |
 | `EMBEDDING_BATCH_SIZE` / `EMBEDDING_MAX_RETRIES` | 向量化时每次请求的切片数；遇到限流时的重试次数 |
 | `LLM_URL` / `LLM_MODEL` / `LLM_API_KEY` | 对话模型（OpenAI 兼容） |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` / `MINIO_SECURE` | MinIO 连接信息与桶名 |

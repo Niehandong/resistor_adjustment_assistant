@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Search, Eye, X, CheckCircle2, XCircle, ThumbsUp, ThumbsDown, Clock, Cpu, Database, Brain,
-  ChevronDown, ChevronRight, Ban, FileText, RotateCcw, User as UserIcon, Bot, GitBranch, Trash2, Copy, Check
+  ChevronDown, ChevronRight, Ban, FileText, RotateCcw, User as UserIcon, Bot, GitBranch, Trash2, Copy, Check, PenLine
 } from 'lucide-react';
 import api from '../../services/api';
 import { Pagination } from '../Common/Pagination';
@@ -51,6 +51,7 @@ interface SourceItem {
 interface RetrievalHit extends SourceItem {
   rank: number;
   blocked: boolean;
+  below_threshold?: boolean;
 }
 
 interface TraceStep {
@@ -88,6 +89,7 @@ interface Filters {
 const EMPTY_FILTERS: Filters = { keyword: '', user_name: '', has_error: '', has_dislike: '', start_date: '', end_date: '' };
 
 const STEP_META: Record<string, { label: string; icon: React.ElementType; color: string; bar: string }> = {
+  rewrite: { label: '问题改写', icon: PenLine, color: 'text-amber-600 bg-amber-50 border-amber-100', bar: 'bg-amber-400' },
   embedding: { label: '查询向量化', icon: Cpu, color: 'text-sky-600 bg-sky-50 border-sky-100', bar: 'bg-sky-400' },
   retrieval: { label: '知识库检索', icon: Database, color: 'text-emerald-600 bg-emerald-50 border-emerald-100', bar: 'bg-emerald-400' },
   llm: { label: '大模型生成', icon: Brain, color: 'text-indigo-600 bg-indigo-50 border-indigo-100', bar: 'bg-indigo-400' },
@@ -206,6 +208,18 @@ const TraceStepCard = ({ step, answer }: { step: TraceStep; answer?: string }) =
         </div>
       )}
 
+      {step.step_type === 'rewrite' && (
+        <div className="text-xs text-slate-600 space-y-1">
+          <div><span className="text-slate-400">原问题：</span>{String(d.original_query ?? '')}</div>
+          <div>
+            <span className="text-slate-400">检索用问题：</span>
+            <span className="font-medium text-slate-800">{String(d.search_query ?? d.original_query ?? '')}</span>
+            {d.search_query === d.original_query && <span className="ml-2 text-slate-400">（与原问题相同，判定为独立问题）</span>}
+          </div>
+          <div><span className="text-slate-400">参考历史：</span>最近 {String(d.history_rounds ?? '-')} 轮</div>
+        </div>
+      )}
+
       {step.step_type === 'embedding' && (
         <div className="text-xs text-slate-600 space-y-1">
           <div><span className="text-slate-400">查询文本：</span>{String(d.query ?? '')}</div>
@@ -215,10 +229,11 @@ const TraceStepCard = ({ step, answer }: { step: TraceStep; answer?: string }) =
 
       {step.step_type === 'retrieval' && (
         <div className="space-y-2">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
             <div className="p-2 rounded-lg bg-slate-50"><div className="text-slate-400">启用文件数</div><div className="font-bold text-slate-700">{String(d.active_file_count ?? '-')}</div></div>
             <div className="p-2 rounded-lg bg-slate-50"><div className="text-slate-400">召回上限</div><div className="font-bold text-slate-700">{String(d.limit ?? '-')}</div></div>
             <div className="p-2 rounded-lg bg-slate-50"><div className="text-slate-400">有效命中</div><div className="font-bold text-emerald-600">{String(d.hit_count ?? '-')}</div></div>
+            <div className="p-2 rounded-lg bg-slate-50"><div className="text-slate-400">低于阈值{d.score_threshold !== undefined ? ` ${Number(d.score_threshold).toFixed(2)}` : ''}</div><div className="font-bold text-slate-500">{String(d.below_threshold_count ?? '-')}</div></div>
             <div className="p-2 rounded-lg bg-slate-50"><div className="text-slate-400">停用拦截</div><div className="font-bold text-amber-600">{String(d.blocked_count ?? '-')}</div></div>
           </div>
           {d.expr !== undefined && (
@@ -227,13 +242,14 @@ const TraceStepCard = ({ step, answer }: { step: TraceStep; answer?: string }) =
           {hits.length > 0 ? (
             <div className="space-y-2">
               {hits.map(h => (
-                <div key={h.rank} className={`p-3 rounded-lg border text-xs ${h.blocked ? 'border-amber-200 bg-amber-50/50 opacity-70' : 'border-slate-200 bg-white'}`}>
+                <div key={h.rank} className={`p-3 rounded-lg border text-xs ${h.blocked ? 'border-amber-200 bg-amber-50/50 opacity-70' : h.below_threshold ? 'border-dashed border-slate-300 bg-slate-50 opacity-60' : 'border-slate-200 bg-white'}`}>
                   <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-1.5">
                     <span className="font-bold text-slate-500">#{h.rank}</span>
                     <span className={`font-mono font-bold ${scoreClass(h.score)}`}>{h.score.toFixed(4)}</span>
                     <span className="text-slate-700 font-medium">{h.source || '未知来源'}</span>
                     <span className="text-slate-400">文件 {h.file_id ?? '-'} · 切片 {h.chunk_id ?? '-'}</span>
                     {h.blocked && <span className="inline-flex items-center gap-1 text-amber-700"><Ban className="w-3 h-3" />文件已停用，已拦截</span>}
+                    {!h.blocked && h.below_threshold && <span className="inline-flex items-center gap-1 text-slate-500"><Ban className="w-3 h-3" />低于阈值，未采用</span>}
                   </div>
                   <div className="text-slate-600 whitespace-pre-wrap break-words leading-relaxed">{h.content}</div>
                 </div>

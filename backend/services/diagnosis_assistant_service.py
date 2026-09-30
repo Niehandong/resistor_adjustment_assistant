@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from pymilvus import connections, Collection, utility
 from langchain_openai.chat_models import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from prompt.diagnosis_prompt import SYSTEM_PROMPT
+from prompt.diagnosis_prompt import SYSTEM_PROMPT, REWRITE_PROMPT, build_user_message, build_rewrite_message
 
 import uuid
 from sqlalchemy import func
@@ -28,13 +28,19 @@ MILVUS_DATABASE = os.getenv("MILVUS_DATABASE")
 EMBEDDING_URL = os.getenv("EMBEDDING_URL")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
 LLM_MODEL = os.getenv("LLM_MODEL")
+# 相似度（COSINE）低于该值的命中视为不相关，不作为参考资料发给大模型
+EMBEDDING_SCORE_THRESHOLD = float(os.getenv("EMBEDDING_SCORE_THRESHOLD", 0.6))
+# 多轮对话中，改写检索问题时参考的最近轮数
+REWRITE_HISTORY_ROUNDS = int(os.getenv("REWRITE_HISTORY_ROUNDS", 3))
 
 llm = get_llm(temperature=0.7)
+rewrite_llm = llm.bind(temperature=0)  # 问题改写需要稳定输出
 
 
 # LangGraph 状态定义
 class AgentState(Dict):
     query: str
+    search_query: str  # 用于向量检索的问题（多轮时为改写后的完整问题）
     session_id: str
     user_id: Optional[int]
     user_name: Optional[str]
@@ -47,23 +53,51 @@ class AgentState(Dict):
 
 # --- 节点函数 ---
 
+async def _rewrite_query(state: AgentState, history: List[Dict[str, Any]]):
+    """多轮对话时结合最近几轮历史，把依赖上下文的追问改写成可独立检索的完整问题；首轮不改写。
+    改写只用于检索，回答仍基于用户原问题；改写失败时回退为原问题。"""
+    state["search_query"] = state["query"]
+    recent = history[-REWRITE_HISTORY_ROUNDS:]
+    if not recent:
+        return state
+    try:
+        with state["tracer"].step("rewrite", LLM_MODEL, {"original_query": state["query"], "history_rounds": len(recent)}) as step:
+            result = await rewrite_llm.ainvoke([
+                SystemMessage(content=REWRITE_PROMPT),
+                HumanMessage(content=build_rewrite_message(recent, state["query"]))
+            ])
+            rewritten = (result.content or "").strip().strip('"“”')
+            usage = getattr(result, "usage_metadata", None) or {}
+            step["prompt_tokens"] = usage.get("input_tokens")
+            step["completion_tokens"] = usage.get("output_tokens")
+            step["total_tokens"] = usage.get("total_tokens")
+            # 输出异常（空或明显过长）时不采用
+            if rewritten and len(rewritten) <= 200:
+                state["search_query"] = rewritten
+            step["detail"]["search_query"] = state["search_query"]
+            step["output_preview"] = rewritten[:500]
+    except Exception as e:
+        logger.warning(f"问题改写失败，使用原问题检索: {e}")
+    return state
+
+
 async def _get_embedding(state: AgentState):
     """调用嵌入模型获取查询向量（复用知识库的批量接口，带限流重试）"""
     logger.info(f"正在调用嵌入模型: {EMBEDDING_URL}, 模型: {EMBEDDING_MODEL}")
-    with state["tracer"].step("embedding", EMBEDDING_MODEL, {"query": state["query"]}) as step:
+    with state["tracer"].step("embedding", EMBEDDING_MODEL, {"query": state["search_query"]}) as step:
         try:
-            state["vector"] = await KnowledgeService.get_embedding(state["query"])
+            state["vector"] = await KnowledgeService.get_embedding(state["search_query"])
         except Exception as e:
             raise Exception(f"嵌入模型调用失败: {str(e)}")
         step["detail"]["dimension"] = len(state["vector"])
     return state
 
 async def _retrieve_milvus(state: AgentState):
-    """从 Milvus 检索启用中的知识库文档切片，并对每条命中回查 SQL 的 is_active"""
+    """从 Milvus 检索启用中的知识库文档切片：回查 SQL 的 is_active，并按相似度阈值过滤"""
     limit = int(os.getenv("EMBEDDING_LIMIT", 5))
     state["raw_results"] = []
     try:
-        with state["tracer"].step("retrieval", COLLECTION_NAME, {"limit": limit}) as step:
+        with state["tracer"].step("retrieval", COLLECTION_NAME, {"limit": limit, "score_threshold": EMBEDDING_SCORE_THRESHOLD}) as step:
             # 1. 获取所有启用的文档文件ID
             with SessionLocal() as db:
                 active_file_ids = [f.id for f in db.query(KnowledgeFile.id).filter(KnowledgeFile.is_active == True).all()]
@@ -99,8 +133,9 @@ async def _retrieve_milvus(state: AgentState):
             )
 
             all_hits = []
-            raw_hits = []  # Milvus 原始命中（含被拦截的），用于链路排查
+            raw_hits = []  # Milvus 原始命中（含被拦截、低于阈值的），用于链路排查
             blocked = 0
+            below_threshold = 0
             if search_results:
                 # 3. 对命中结果回查 SQL 的 is_active，保证即使向量残留，下线也立即生效
                 hit_file_ids = {(hit.entity.get("metadata") or {}).get("file_id") for hit in search_results[0]}
@@ -113,6 +148,7 @@ async def _retrieve_milvus(state: AgentState):
                 for rank, hit in enumerate(search_results[0], 1):
                     metadata = hit.entity.get("metadata") or {}
                     is_blocked = metadata.get("file_id") not in still_active
+                    is_below = hit.score < EMBEDDING_SCORE_THRESHOLD
                     raw_hits.append({
                         "rank": rank,
                         "score": round(hit.score, 4),
@@ -120,11 +156,15 @@ async def _retrieve_milvus(state: AgentState):
                         "chunk_id": metadata.get("chunk_id"),
                         "source": metadata.get("source"),
                         "blocked": is_blocked,
+                        "below_threshold": is_below,
                         "content": (hit.entity.get("page_content") or "")[:500]
                     })
                     if is_blocked:
                         logger.info(f"安全拦截：文件 ID {metadata.get('file_id')} 已停用，跳过加载。")
                         blocked += 1
+                        continue
+                    if is_below:
+                        below_threshold += 1
                         continue
                     all_hits.append({
                         "id": hit.id,
@@ -139,11 +179,12 @@ async def _retrieve_milvus(state: AgentState):
             state["raw_results"] = all_hits[:10]
             step["detail"]["hit_count"] = len(state["raw_results"])
             step["detail"]["blocked_count"] = blocked
+            step["detail"]["below_threshold_count"] = below_threshold
             step["detail"]["hits"] = raw_hits
             step["output_preview"] = "\n".join(
                 f"[{h['score']:.4f}] {h['metadata'].get('source')} #切片{h['metadata'].get('chunk_id')}：{h['page_content'][:80]}"
                 for h in state["raw_results"]
-            ) or "无命中"
+            ) or ("无命中" if not raw_hits else f"全部 {len(raw_hits)} 条命中低于相似度阈值 {EMBEDDING_SCORE_THRESHOLD}，未采用")
     except Exception as e:
         # 检索失败不中断问答，错误已记录在链路追踪中
         logger.error(f"Milvus 检索过程出错: {str(e)}")
@@ -295,6 +336,7 @@ async def run_diagnosis_stream(query_text: str, session_id: str, user_id: Option
     """
     state = {
         "query": query_text,
+        "search_query": query_text,
         "session_id": session_id,
         "user_id": user_id,
         "user_name": user_name,
@@ -309,25 +351,18 @@ async def run_diagnosis_stream(query_text: str, session_id: str, user_id: Option
     saved = False
 
     try:
-        # 1. 执行前置节点 (嵌入, 检索, 重排序)
+        # 失败的轮次不作为上下文
+        history = [h for h in get_chat_history(state["session_id"], state["user_id"], state["db"]) if not h["is_error"]]
+
+        # 1. 执行前置节点 (问题改写, 嵌入, 检索, 重排序)
+        state = await _rewrite_query(state, history)
         state = await _get_embedding(state)
         state = await _retrieve_milvus(state)
         state = await _rerank_results(state)
 
         # 2. 准备流式对话
-        final_results_str = ""
-        for idx, result in enumerate(state["final_results"], 1):
-            content = result.get("page_content", "")
-            source = (result.get("metadata") or {}).get("source", "未知来源")
-            if content:
-                final_results_str += f"参考资料 {idx} (来源: {source}):\n{content}\n\n"
+        query = build_user_message(state["query"], state["final_results"])
 
-        query = f"用户问题：{state['query']}\n\n"
-        if final_results_str:
-            query += f"参考资料：\n{final_results_str}"
-
-        # 失败的轮次不作为上下文
-        history = [h for h in get_chat_history(state["session_id"], state["user_id"], state["db"]) if not h["is_error"]]
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
         for h in history:
             messages.append(HumanMessage(content=h["query_text"]))
