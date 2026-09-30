@@ -1,0 +1,12 @@
+docs/*
+backend/.env
+frontend/.env
+frontend/node_modules
+frontend/dist
+frontend/package-lock.json
+backend/__pycache__/*
+backend/**/__pycache__/*
+.venv/*
+**/*.pid
+**/*.log
+backend/logs/*
