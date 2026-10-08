@@ -70,7 +70,7 @@ def api_change_password(
     db: Session = Depends(get_db)
 ):
     """
-    修改当前登录用户的密码；成功后退出该用户在其他设备上的登录
+    修改当前登录用户的密码；成功后退出该用户的全部登录（含当前设备），需用新密码重新登录
     """
     if not verify_password(data.old_password, user.password):
         return make_response(code=400, msg="旧密码错误")
@@ -80,5 +80,10 @@ def api_change_password(
         return make_response(code=400, msg=err)
     user.password = hash_password(data.new_password)
     db.commit()
-    delete_user_sessions(user.id, keep_token=request.cookies.get(SESSION_COOKIE))
-    return make_response(msg="密码修改成功")
+    delete_user_sessions(user.id)
+
+    # 撤销本次请求的 Cookie 续期（否则 SessionCookieMiddleware 会把已作废的令牌重新写回浏览器）
+    request.state.session_token = None
+    response = JSONResponse(make_response(msg="密码修改成功，请使用新密码重新登录"))
+    clear_session_cookie(response)
+    return response

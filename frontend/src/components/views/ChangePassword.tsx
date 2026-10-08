@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Cookies from 'js-cookie';
 import { Lock, ShieldCheck, AlertCircle, CheckCircle2, Eye, EyeOff, User } from 'lucide-react';
 import { authService } from '../../services/request';
+import { clearLocalUser } from '../../services/authSession';
 
 export function ChangePassword() {
   const [oldPassword, setOldPassword] = useState('');
@@ -10,6 +12,7 @@ export function ChangePassword() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+  const navigate = useNavigate();
 
   // 控制密码可见性的状态
   const [showOld, setShowOld] = useState(false);
@@ -49,11 +52,15 @@ export function ChangePassword() {
 
       // 响应拦截器已经处理了 code === 200，并返回了 res.data (此处为 null)
       // 如果没有抛出错误，说明修改成功
-      // 当前设备保持登录，其他设备上的登录已由后端退出
-      setSuccess('密码修改成功，其他设备上的登录已退出。');
+      // 后端已退出该账号的全部登录（含当前设备），清除本地信息后跳转登录页
+      setSuccess('密码修改成功！请使用新密码重新登录，2 秒后跳转到登录页面...');
       setOldPassword('');
       setNewPassword('');
       setConfirmPassword('');
+      clearLocalUser();
+
+      // 延时 2 秒后跳转，让用户看清成功提示
+      setTimeout(() => navigate('/login', { replace: true }), 2000);
       
     } catch (err: any) {
       // 这里的 err 是拦截器中 Promise.reject 抛出的 Error 对象
