@@ -10,9 +10,20 @@ export const saveLocalUser = (user: unknown) => {
   localStorage.setItem(USER_STORAGE, data);
 };
 
+// 诊断助手「当前会话」按账号分别记录，避免同一浏览器切换账号后沿用他人的会话
+const SESSION_ID_KEY = 'diagnosis_assistant_session_id';
+const LEGACY_SESSION_ID_KEY = SESSION_ID_KEY; // 旧版本不区分账号的键
+
+export const getStoredSessionId = (userId: number) => localStorage.getItem(`${SESSION_ID_KEY}:${userId}`);
+
+export const storeSessionId = (userId: number, sessionId: string) => {
+  localStorage.setItem(`${SESSION_ID_KEY}:${userId}`, sessionId);
+};
+
 export const clearLocalUser = () => {
   Cookies.remove(USER_COOKIE);
   localStorage.removeItem(USER_STORAGE);
+  localStorage.removeItem(LEGACY_SESSION_ID_KEY);
 };
 
 // 会话失效：清除本地信息并回到登录页

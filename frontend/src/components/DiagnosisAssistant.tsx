@@ -12,7 +12,7 @@ import remarkGfm from 'remark-gfm';
 import Cookies from 'js-cookie';
 import dayjs from 'dayjs';
 import api from '../services/api';
-import { handleSessionExpired } from '../services/authSession';
+import { handleSessionExpired, getStoredSessionId, storeSessionId } from '../services/authSession';
 
 // --- 类型定义 ---
 interface Message {
@@ -123,11 +123,15 @@ export const DiagnosisAssistant = () => {
     const userStr = Cookies.get('raUserInfo') || localStorage.getItem('ra_user');
     if (userStr) { try { setCurrentUser(JSON.parse(userStr)); } catch (e) {} }
 
-    let sid = localStorage.getItem('diagnosis_assistant_session_id');
-    if (!sid) { sid = generateUUID(); localStorage.setItem('diagnosis_assistant_session_id', sid); }
-    setSessionId(sid);
-    
     const user = userStr ? JSON.parse(userStr) : null;
+    // 每个账号恢复自己上次的会话，没有则新建
+    let sid = user?.id ? getStoredSessionId(user.id) : null;
+    if (!sid) {
+      sid = generateUUID();
+      if (user?.id) storeSessionId(user.id, sid);
+    }
+    setSessionId(sid);
+
     if (user?.id) {
       fetchSessions();
       fetchHistory(sid);
@@ -160,7 +164,7 @@ export const DiagnosisAssistant = () => {
   const handleNewChat = () => {
     if (isLoading) abortControllerRef.current?.abort();
     const newSid = generateUUID();
-    localStorage.setItem('diagnosis_assistant_session_id', newSid);
+    if (currentUser?.id) storeSessionId(currentUser.id, newSid);
     setSessionId(newSid);
     setMessages([{ id: 'welcome', role: 'assistant', content: '开启新会话，请描述您遇到的设备问题。', timestamp: new Date() }]);
     // 在移动端开启新对话后自动收起侧边栏
@@ -170,8 +174,10 @@ export const DiagnosisAssistant = () => {
   const handleSelectSession = (sid: string) => {
     if (isLoading) abortControllerRef.current?.abort();
     setSessionId(sid);
-    localStorage.setItem('diagnosis_assistant_session_id', sid);
-    if (currentUser?.id) fetchHistory(sid);
+    if (currentUser?.id) {
+      storeSessionId(currentUser.id, sid);
+      fetchHistory(sid);
+    }
     // 在移动端选择会话后自动收起侧边栏
     if (window.innerWidth <= 1024) setIsSidebarVisible(false);
   };
