@@ -120,6 +120,8 @@ location /api/ {
 | `EMBEDDING_SCORE_THRESHOLD` | 检索相似度阈值（默认 0.60），低于该值的切片不作为参考资料；可结合「会话记录」中的检索得分调整 |
 | `EMBEDDING_BATCH_SIZE` / `EMBEDDING_MAX_RETRIES` | 向量化时每次请求的切片数；遇到限流时的重试次数 |
 | `LLM_URL` / `LLM_MODEL` / `LLM_API_KEY` | 对话模型（OpenAI 兼容） |
+| `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | 大模型请求的等待上限（秒，默认 90）与失败重试次数（默认 1）。网关故障时，用户最多等待约 `LLM_TIMEOUT ×（重试次数 + 1）` 秒后看到报错 |
+| `REWRITE_TIMEOUT` | 多轮问题改写的等待上限（秒，默认 15），超时直接用原问题检索 |
 | `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` / `MINIO_BUCKET` / `MINIO_SECURE` | MinIO 连接信息与桶名 |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` | Redis 连接信息，默认 DB 11，键前缀 `resistor:` |
 | `SESSION_EXPIRE_SECONDS` | 登录有效期（秒），默认 7200 |

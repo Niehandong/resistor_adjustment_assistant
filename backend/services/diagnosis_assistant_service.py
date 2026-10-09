@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import logging
 import time
@@ -15,7 +16,8 @@ from models.models import Message, AgentTrace, KnowledgeFile, Conversation
 from services.knowledge_service import COLLECTION_NAME, KnowledgeService
 from utils.database import SessionLocal
 
-from utils.executor import get_llm
+import openai
+from utils.executor import get_llm, create_llm
 from utils.tracing import Tracer
 
 logger = logging.getLogger(__name__)
@@ -34,7 +36,38 @@ EMBEDDING_SCORE_THRESHOLD = float(os.getenv("EMBEDDING_SCORE_THRESHOLD", 0.6))
 REWRITE_HISTORY_ROUNDS = int(os.getenv("REWRITE_HISTORY_ROUNDS", 3))
 
 llm = get_llm(temperature=0.7)
-rewrite_llm = llm.bind(temperature=0)  # 问题改写需要稳定输出
+# 问题改写只为提高检索准确度，不是必需步骤：输出要稳定，等待要短，失败直接回退原问题，不重试
+REWRITE_TIMEOUT = float(os.getenv("REWRITE_TIMEOUT", 15))
+rewrite_llm = create_llm(temperature=0, timeout=REWRITE_TIMEOUT, max_retries=0)
+
+
+class EmbeddingError(Exception):
+    """查询向量化失败（区别于大模型生成失败，便于给用户不同的提示）"""
+
+
+def _brief_error(e: Exception) -> str:
+    """日志用的错误摘要：类型 + 状态码 + 压缩成一行的前 200 字（避免整段 HTML 刷屏）"""
+    status = getattr(e, "status_code", None)
+    text = re.sub(r"<[^>]+>", " ", str(e))
+    text = re.sub(r"\s+", " ", text).strip()[:200]
+    return f"{type(e).__name__}{f' (HTTP {status})' if status else ''}: {text}"
+
+
+def _friendly_error(e: Exception) -> str:
+    """把异常转换成给用户看的提示；完整原始错误保留在链路追踪的 error 字段中"""
+    if isinstance(e, EmbeddingError):
+        return "知识库检索服务暂时不可用，请稍后重试。"
+    if isinstance(e, openai.RateLimitError):
+        return "当前请求较多，大模型服务繁忙，请稍后重试。"
+    if isinstance(e, openai.APITimeoutError):
+        return "大模型服务响应超时，请稍后重试。"
+    if isinstance(e, openai.APIConnectionError):
+        return "无法连接大模型服务，请联系管理员检查网络或模型网关。"
+    if isinstance(e, openai.APIStatusError):
+        if e.status_code >= 500:
+            return f"大模型服务暂时无响应（HTTP {e.status_code}），请稍后重试。"
+        return f"大模型服务请求失败（HTTP {e.status_code}），请联系管理员检查模型配置。"
+    return "系统处理出错，请稍后重试。"
 
 
 # LangGraph 状态定义
@@ -77,7 +110,7 @@ async def _rewrite_query(state: AgentState, history: List[Dict[str, Any]]):
             step["detail"]["search_query"] = state["search_query"]
             step["output_preview"] = rewritten[:500]
     except Exception as e:
-        logger.warning(f"问题改写失败，使用原问题检索: {e}")
+        logger.warning(f"问题改写失败，使用原问题检索: {_brief_error(e)}")
     return state
 
 
@@ -88,7 +121,7 @@ async def _get_embedding(state: AgentState):
         try:
             state["vector"] = await KnowledgeService.get_embedding(state["search_query"])
         except Exception as e:
-            raise Exception(f"嵌入模型调用失败: {str(e)}")
+            raise EmbeddingError(f"嵌入模型调用失败: {str(e)}") from e
         step["detail"]["dimension"] = len(state["vector"])
     return state
 
@@ -409,8 +442,8 @@ async def run_diagnosis_stream(query_text: str, session_id: str, user_id: Option
         raise
 
     except Exception as e:
-        logger.error(f"Streaming Error: {str(e)}")
-        error_text = f"抱歉，系统出现错误：{str(e)}"
+        logger.error(f"Streaming Error: {_brief_error(e)}")
+        error_text = f"抱歉，{_friendly_error(e)}"
         state["model_results"] = f"{full_content}\n\n{error_text}".strip()
         msg_id = save_chat_history(state, db, is_error=True)
         yield {"answer": error_text, "done": True, "message_id": msg_id}
